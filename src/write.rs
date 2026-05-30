@@ -118,7 +118,7 @@ where
 
     #[inline(always)]
     fn write_le_f32(&mut self, x: f32) -> io::Result<()> {
-        self.write_le_u32(x.to_bits())
+        self.write_le_u32(unsafe { std::mem::transmute(x) })
     }
 }
 
@@ -894,12 +894,16 @@ fn s24_wav_write() {
     use std::io::Read;
     let mut buffer = io::Cursor::new(Vec::new());
 
-    let spec = WavSpecEx::from(WavSpec {
-        channels: 2,
-        sample_rate: 48000,
-        bits_per_sample: 24,
-        sample_format: SampleFormat::Int,
-    });
+    let spec = WavSpecEx {
+        bytes_per_sample: 4,
+        ..WavSpec {
+            channels: 2,
+            sample_rate: 48000,
+            bits_per_sample: 24,
+            sample_format: SampleFormat::Int,
+        }
+        .into()
+    };
 
     {
         let mut writer = WavWriter::new_with_spec_ex(&mut buffer, spec).unwrap();
