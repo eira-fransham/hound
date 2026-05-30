@@ -10,6 +10,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::FmtKind;
+
 use super::{Error, Result, Sample, SampleFormat, WavSpec, WavSpecEx};
 use read;
 use std::fs;
@@ -116,8 +118,7 @@ where
 
     #[inline(always)]
     fn write_le_f32(&mut self, x: f32) -> io::Result<()> {
-        let u = unsafe { mem::transmute::<f32, u32>(x) };
-        self.write_le_u32(u)
+        self.write_le_u32(x.to_bits())
     }
 }
 
@@ -191,11 +192,6 @@ where
     data_len_offset: u32,
 }
 
-enum FmtKind {
-    PcmWaveFormat,
-    WaveFormatExtensible,
-}
-
 impl<W> WavWriter<W>
 where
     W: io::Write + io::Seek,
@@ -210,11 +206,7 @@ where
     /// This writes parts of the header immediately, hence a `Result` is
     /// returned.
     pub fn new(writer: W, spec: WavSpec) -> Result<WavWriter<W>> {
-        let spec_ex = WavSpecEx {
-            spec: spec,
-            bytes_per_sample: (spec.bits_per_sample + 7) / 8,
-        };
-        WavWriter::new_with_spec_ex(writer, spec_ex)
+        WavWriter::new_with_spec_ex(writer, spec.into())
     }
 
     /// Creates a writer that writes the WAVE format to the underlying writer.
@@ -229,16 +221,6 @@ where
     pub fn new_with_spec_ex(writer: W, spec_ex: WavSpecEx) -> Result<WavWriter<W>> {
         let spec = spec_ex.spec;
 
-        // Write the older PCMWAVEFORMAT structure if possible, because it is
-        // more widely supported. For more than two channels or more than 16
-        // bits per sample, the newer WAVEFORMATEXTENSIBLE is required. See also
-        // https://msdn.microsoft.com/en-us/library/ms713497.aspx.
-        let fmt_kind = if spec.channels > 2 || spec.bits_per_sample > 16 {
-            FmtKind::WaveFormatExtensible
-        } else {
-            FmtKind::PcmWaveFormat
-        };
-
         let mut writer = WavWriter {
             spec: spec,
             bytes_per_sample: spec_ex.bytes_per_sample,
@@ -246,7 +228,7 @@ where
             data_bytes_written: 0,
             sample_writer_buffer: Vec::new(),
             finalized: false,
-            data_len_offset: match fmt_kind {
+            data_len_offset: match spec_ex.fmt_kind {
                 FmtKind::WaveFormatExtensible => 64,
                 FmtKind::PcmWaveFormat => 40,
             },
@@ -268,7 +250,7 @@ where
         }
 
         // Write headers, up to the point where data should be written.
-        try!(writer.write_headers(fmt_kind));
+        writer.write_headers(spec_ex.fmt_kind)?;
 
         Ok(writer)
     }
@@ -282,28 +264,28 @@ where
             let mut buffer = io::Cursor::new(&mut header[..]);
 
             // Write the headers for the RIFF WAVE format.
-            try!(buffer.write_all("RIFF".as_bytes()));
+            buffer.write_all("RIFF".as_bytes())?;
 
             // Skip 4 bytes that will be filled with the file size afterwards.
-            try!(buffer.write_le_u32(0));
+            buffer.write_le_u32(0)?;
 
-            try!(buffer.write_all("WAVE".as_bytes()));
-            try!(buffer.write_all("fmt ".as_bytes()));
+            buffer.write_all("WAVE".as_bytes())?;
+            buffer.write_all("fmt ".as_bytes())?;
 
             match fmt_kind {
                 FmtKind::PcmWaveFormat => {
-                    try!(self.write_pcmwaveformat(&mut buffer));
+                    self.write_pcmwaveformat(&mut buffer)?;
                 }
                 FmtKind::WaveFormatExtensible => {
-                    try!(self.write_waveformatextensible(&mut buffer));
+                    self.write_waveformatextensible(&mut buffer)?;
                 }
             }
 
             // Finally the header of the "data" chunk. The number of bytes
             // that this will take is not known at this point. The 0 will
             // be overwritten later.
-            try!(buffer.write_all("data".as_bytes()));
-            try!(buffer.write_le_u32(0));
+            buffer.write_all("data".as_bytes())?;
+            buffer.write_le_u32(0)?;
         }
 
         // The data length field are the last 4 bytes of the header.
@@ -319,17 +301,17 @@ where
     fn write_waveformat(&self, buffer: &mut io::Cursor<&mut [u8]>) -> io::Result<()> {
         let spec = &self.spec;
         // The field nChannels.
-        try!(buffer.write_le_u16(spec.channels));
+        buffer.write_le_u16(spec.channels)?;
 
         // The field nSamplesPerSec.
-        try!(buffer.write_le_u32(spec.sample_rate));
+        buffer.write_le_u32(spec.sample_rate)?;
         let bytes_per_sec = spec.sample_rate * self.bytes_per_sample as u32 * spec.channels as u32;
 
         // The field nAvgBytesPerSec;
-        try!(buffer.write_le_u32(bytes_per_sec));
+        buffer.write_le_u32(bytes_per_sec)?;
 
         // The field nBlockAlign. Block align * sample rate = bytes per sec.
-        try!(buffer.write_le_u16((bytes_per_sec / spec.sample_rate) as u16));
+        buffer.write_le_u16((bytes_per_sec / spec.sample_rate) as u16)?;
 
         Ok(())
     }
@@ -337,7 +319,7 @@ where
     /// Writes the content of the fmt chunk as PCMWAVEFORMAT struct.
     fn write_pcmwaveformat(&mut self, buffer: &mut io::Cursor<&mut [u8]>) -> io::Result<()> {
         // Write the size of the WAVE header chunk.
-        try!(buffer.write_le_u32(16));
+        buffer.write_le_u32(16)?;
 
         // The following is based on the PCMWAVEFORMAT struct as documented at
         // https://msdn.microsoft.com/en-us/library/ms712832.aspx. See also
@@ -347,12 +329,12 @@ where
         match self.spec.sample_format {
             // WAVE_FORMAT_PCM
             SampleFormat::Int => {
-                try!(buffer.write_le_u16(1));
+                buffer.write_le_u16(1)?;
             }
             // WAVE_FORMAT_IEEE_FLOAT
             SampleFormat::Float => {
                 if self.spec.bits_per_sample == 32 {
-                    try!(buffer.write_le_u16(3));
+                    buffer.write_le_u16(3)?;
                 } else {
                     panic!(
                         "Invalid number of bits per sample. \
@@ -363,10 +345,10 @@ where
             }
         };
 
-        try!(self.write_waveformat(buffer));
+        self.write_waveformat(buffer)?;
 
         // The field wBitsPerSample, the real number of bits per sample.
-        try!(buffer.write_le_u16(self.spec.bits_per_sample));
+        buffer.write_le_u16(self.spec.bits_per_sample)?;
 
         // Note: for WAVEFORMATEX, there would be another 16-byte field `cbSize`
         // here that should be set to zero. And the header size would be 18
@@ -378,7 +360,7 @@ where
     /// Writes the contents of the fmt chunk as WAVEFORMATEXTENSIBLE struct.
     fn write_waveformatextensible(&mut self, buffer: &mut io::Cursor<&mut [u8]>) -> io::Result<()> {
         // Write the size of the WAVE header chunk.
-        try!(buffer.write_le_u32(40));
+        buffer.write_le_u32(40)?;
 
         // The following is based on the WAVEFORMATEXTENSIBLE struct, documented
         // at https://msdn.microsoft.com/en-us/library/ms713496.aspx and
@@ -386,21 +368,21 @@ where
 
         // The field wFormatTag, value 1 means WAVE_FORMAT_PCM, but we use
         // the slightly more sophisticated WAVE_FORMAT_EXTENSIBLE.
-        try!(buffer.write_le_u16(0xfffe));
+        buffer.write_le_u16(0xfffe)?;
 
-        try!(self.write_waveformat(buffer));
+        self.write_waveformat(buffer)?;
 
         // The field wBitsPerSample. This is actually the size of the
         // container, so this is a multiple of 8.
-        try!(buffer.write_le_u16(self.bytes_per_sample as u16 * 8));
+        buffer.write_le_u16(self.bytes_per_sample as u16 * 8)?;
         // The field cbSize, the number of remaining bytes in the struct.
-        try!(buffer.write_le_u16(22));
+        buffer.write_le_u16(22)?;
         // The field wValidBitsPerSample, the real number of bits per sample.
-        try!(buffer.write_le_u16(self.spec.bits_per_sample));
+        buffer.write_le_u16(self.spec.bits_per_sample)?;
         // The field dwChannelMask.
         // TODO: add the option to specify the channel mask. For now, use
         // the default assignment.
-        try!(buffer.write_le_u32(channel_mask(self.spec.channels)));
+        buffer.write_le_u32(channel_mask(self.spec.channels))?;
 
         // The field SubFormat.
         let subformat_guid = match self.spec.sample_format {
@@ -419,7 +401,7 @@ where
                 }
             }
         };
-        try!(buffer.write_all(&subformat_guid));
+        buffer.write_all(&subformat_guid)?;
 
         Ok(())
     }
@@ -431,11 +413,11 @@ where
     /// sample does not fit in the number of bits specified in the `WavSpec`.
     #[inline]
     pub fn write_sample<S: Sample>(&mut self, sample: S) -> Result<()> {
-        try!(sample.write_padded(
+        sample.write_padded(
             &mut self.writer,
             self.spec.bits_per_sample,
             self.bytes_per_sample,
-        ));
+        )?;
         self.data_bytes_written += self.bytes_per_sample as u32;
         Ok(())
     }
@@ -495,12 +477,11 @@ where
         let header_size = self.data_len_offset + 4 - 8;
         let file_size = self.data_bytes_written + header_size;
 
-        try!(self.writer.seek(io::SeekFrom::Start(4)));
-        try!(self.writer.write_le_u32(file_size));
-        try!(self
-            .writer
-            .seek(io::SeekFrom::Start(self.data_len_offset as u64)));
-        try!(self.writer.write_le_u32(self.data_bytes_written));
+        self.writer.seek(io::SeekFrom::Start(4))?;
+        self.writer.write_le_u32(file_size)?;
+        self.writer
+            .seek(io::SeekFrom::Start(self.data_len_offset as u64))?;
+        self.writer.write_le_u32(self.data_bytes_written)?;
 
         // Signal error if the last sample was not finished, but do so after
         // everything has been written, so that no data is lost, even though
@@ -531,10 +512,10 @@ where
     /// It is not necessary to call `finalize()` directly after `flush()`, if no
     /// samples have been written after flushing.
     pub fn flush(&mut self) -> Result<()> {
-        let current_pos = try!(self.writer.seek(io::SeekFrom::Current(0)));
-        try!(self.update_header());
-        try!(self.writer.flush());
-        try!(self.writer.seek(io::SeekFrom::Start(current_pos)));
+        let current_pos = self.writer.seek(io::SeekFrom::Current(0))?;
+        self.update_header()?;
+        self.writer.flush()?;
+        self.writer.seek(io::SeekFrom::Start(current_pos))?;
         Ok(())
     }
 
@@ -545,12 +526,12 @@ where
     /// that occur in the process cannot be observed in that manner.
     pub fn finalize(mut self) -> Result<()> {
         self.finalized = true;
-        try!(self.update_header());
+        self.update_header()?;
         // We need to perform a flush here to truly capture all errors before
         // the writer is dropped: for a buffered writer, the write to the buffer
         // may succeed, but the write to the underlying writer may fail. So
         // flush explicitly.
-        try!(self.writer.flush());
+        self.writer.flush()?;
         Ok(())
     }
 
@@ -601,13 +582,13 @@ where
 /// Returns (spec_ex, data_len, data_len_offset).
 fn read_append<W: io::Read + io::Seek>(mut reader: &mut W) -> Result<(WavSpecEx, u32, u32)> {
     let (spec_ex, data_len) = {
-        try!(read::read_wave_header(&mut reader));
-        try!(read::read_until_data(&mut reader))
+        read::read_wave_header(&mut reader)?;
+        read::read_until_data(&mut reader)?
     };
 
     // Record the position of the data chunk length, so we can overwrite it
     // later.
-    let data_len_offset = try!(reader.seek(io::SeekFrom::Current(0))) as u32 - 4;
+    let data_len_offset = reader.seek(io::SeekFrom::Current(0))? as u32 - 4;
 
     let spec = spec_ex.spec;
     let num_samples = data_len / spec_ex.bytes_per_sample as u32;
@@ -653,7 +634,7 @@ impl WavWriter<io::BufWriter<fs::File>> {
         filename: P,
         spec: WavSpec,
     ) -> Result<WavWriter<io::BufWriter<fs::File>>> {
-        let file = try!(fs::File::create(filename));
+        let file = fs::File::create(filename)?;
         let buf_writer = io::BufWriter::new(file);
         WavWriter::new(buf_writer, spec)
     }
@@ -667,17 +648,20 @@ impl WavWriter<io::BufWriter<fs::File>> {
     /// See `WavWriter::new_append()` for more details about append behavior.
     pub fn append<P: AsRef<path::Path>>(filename: P) -> Result<WavWriter<io::BufWriter<fs::File>>> {
         // Open the file in append mode, start reading from the start.
-        let mut file = try!(fs::OpenOptions::new().read(true).write(true).open(filename));
-        try!(file.seek(io::SeekFrom::Start(0)));
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(filename)?;
+        file.seek(io::SeekFrom::Start(0))?;
 
         // Read the header using a buffered reader.
         let mut buf_reader = io::BufReader::new(file);
-        let (spec_ex, data_len, data_len_offset) = try!(read_append(&mut buf_reader));
+        let (spec_ex, data_len, data_len_offset) = read_append(&mut buf_reader)?;
         let mut file = buf_reader.into_inner();
 
         // Seek to the data position, and from now on, write using a buffered
         // writer.
-        try!(file.seek(io::SeekFrom::Current(data_len as i64)));
+        file.seek(io::SeekFrom::Current(data_len as i64))?;
         let buf_writer = io::BufWriter::new(file);
 
         let writer = WavWriter {
@@ -711,8 +695,8 @@ where
     /// is not an issue, because Hound never writes a fact chunk. For all the
     /// formats that Hound can write, the fact chunk is redundant.
     pub fn new_append(mut writer: W) -> Result<WavWriter<W>> {
-        let (spec_ex, data_len, data_len_offset) = try!(read_append(&mut writer));
-        try!(writer.seek(io::SeekFrom::Current(data_len as i64)));
+        let (spec_ex, data_len, data_len_offset) = read_append(&mut writer)?;
+        writer.seek(io::SeekFrom::Current(data_len as i64))?;
         let writer = WavWriter {
             spec: spec_ex.spec,
             bytes_per_sample: spec_ex.bytes_per_sample,
@@ -830,7 +814,7 @@ impl<'parent, W: io::Write + io::Seek> SampleWriter16<'parent, W> {
         // slice_assume_init_ref.
         let slice = unsafe { &*(self.buffer as *const [MaybeUninit<u8>] as *const [u8]) };
 
-        try!(self.writer.write_all(slice));
+        self.writer.write_all(slice)?;
 
         *self.data_bytes_written += self.buffer.len() as u32;
         Ok(())
@@ -910,15 +894,13 @@ fn s24_wav_write() {
     use std::io::Read;
     let mut buffer = io::Cursor::new(Vec::new());
 
-    let spec = WavSpecEx {
-        spec: WavSpec {
-            channels: 2,
-            sample_rate: 48000,
-            bits_per_sample: 24,
-            sample_format: SampleFormat::Int,
-        },
-        bytes_per_sample: 4,
-    };
+    let spec = WavSpecEx::from(WavSpec {
+        channels: 2,
+        sample_rate: 48000,
+        bits_per_sample: 24,
+        sample_format: SampleFormat::Int,
+    });
+
     {
         let mut writer = WavWriter::new_with_spec_ex(&mut buffer, spec).unwrap();
         assert!(writer.write_sample(-96_i32).is_ok());
