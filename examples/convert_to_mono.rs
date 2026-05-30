@@ -31,12 +31,13 @@ use std::io::Write;
 /// format to the writer.
 ///
 /// This assumes the wav header has already been written.
-fn mux_into_mono<S, R, W>(
-    reader: &mut hound::WavReader<R>,
-    writer: &mut W,
-) -> hound::Result<()>
+fn mux_into_mono<S, R, W>(reader: &mut hound::WavReader<R>, writer: &mut W) -> hound::Result<()>
 where
-    S: Copy + hound::Sample + std::ops::AddAssign + std::ops::Div<Output=S> + std::convert::From<i16>,
+    S: Copy
+        + hound::Sample
+        + std::ops::AddAssign
+        + std::ops::Div<Output = S>
+        + std::convert::From<i16>,
     R: io::Read,
     W: io::Write,
 {
@@ -47,9 +48,7 @@ where
     let mut mono_sample = S::from(0);
     let mut channel_stride_index = 0;
 
-    for sample in
-        reader.samples::<S>()
-    {
+    for sample in reader.samples::<S>() {
         let sample = sample?;
 
         if channel_stride_index == channel_count {
